@@ -52,7 +52,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'TVBox 接口未开启' }, { status: 403 });
     }
 
-    if (!password || inputPassword !== password) {
+    if (!password && inputPassword !== password) {
       return NextResponse.json({ error: '密码错误或未提供' }, { status: 401 });
     }
 
@@ -85,6 +85,7 @@ export async function GET(request: Request) {
     };
 
     const payload: Record<string, any> = {
+      spider: '',  // 部分 TVBox 客户端严格校验，缺失会报"配置加载失败"
       sites: [doubanCustomSite, ...tvboxSites],
       parses: [],
       lives: [],
