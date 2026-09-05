@@ -17,6 +17,8 @@ const SEARCH_HISTORY_LIMIT = 20;
 interface D1Database {
   prepare(query: string): D1PreparedStatement;
   exec(query: string): Promise<D1Result>;
+  // 批量执行多条语句（一次 API 请求内完成，用于规避单次 Worker invocation 的 subrequest 限制）
+  batch(statements: D1PreparedStatement[]): Promise<D1Result[]>;
 }
 
 interface D1PreparedStatement {
@@ -798,5 +800,272 @@ export class D1Storage implements IStorage {
     await this.db.prepare('DELETE FROM today_updated').run();
     await this.db.prepare('DELETE FROM users').run();
     await this.db.prepare('DELETE FROM admin_config').run();
+  }
+
+  // ============================================================
+  // 批量导入（数据迁移专用）
+  // 说明：Cloudflare 对单个 Worker invocation 的 subrequest（D1 API 请求）数量
+  // 有限制。逐条写入在导入大量数据时会触发
+  // “Too many API requests by single Worker invocation”错误。
+  // 这里借助 D1 的 batch() 将多条写语句打包成一次 API 请求，从而大幅减少
+  // subrequest 数量，规避该限制。
+  // ============================================================
+
+  // 将一批已构建好的语句按 D1 batch 上限（100 条/次）分批执行。
+  // onProgress 每完成一批回调一次（done 为已执行的语句条数，total 为语句总数），
+  // 用于让上层按批次推送进度，避免进度条长时间停滞。
+  private async runBatch(
+    statements: D1PreparedStatement[],
+    onProgress?: (done: number, total: number) => void
+  ): Promise<void> {
+    const BATCH_LIMIT = 100;
+    let done = 0;
+    for (let i = 0; i < statements.length; i += BATCH_LIMIT) {
+      const chunk = statements.slice(i, i + BATCH_LIMIT);
+      await this.db.batch(chunk);
+      done += chunk.length;
+      if (onProgress) onProgress(done, statements.length);
+    }
+  }
+
+  // 批量导入播放记录（entries: [key, record][]，key 形如 "source+videoId"）
+  async batchImportPlayRecords(
+    username: string,
+    entries: Array<[string, PlayRecord]>,
+    onProgress?: (done: number, total: number) => void
+  ): Promise<void> {
+    const userId = await this.ensureUser(username);
+    const statements: D1PreparedStatement[] = [];
+    for (const [key, record] of entries) {
+      const [source, videoId] = key.split('+');
+      if (!source || !videoId) continue;
+      statements.push(
+        this.db
+          .prepare(
+            `
+            INSERT INTO play_records
+            (user_id, source, video_id, title, source_name, year, cover, episode_index,
+             total_episodes, play_time, total_time, save_time, search_title)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, source, video_id)
+            DO UPDATE SET
+              title = excluded.title,
+              source_name = excluded.source_name,
+              year = excluded.year,
+              cover = excluded.cover,
+              episode_index = excluded.episode_index,
+              total_episodes = excluded.total_episodes,
+              play_time = excluded.play_time,
+              total_time = excluded.total_time,
+              save_time = excluded.save_time,
+              search_title = excluded.search_title,
+              updated_at = CURRENT_TIMESTAMP
+            `
+          )
+          .bind(
+            userId,
+            source,
+            videoId,
+            record.title || '',
+            record.source_name || '',
+            record.year || '',
+            record.cover || '',
+            record.index ?? 0,
+            record.total_episodes ?? 0,
+            record.play_time ?? 0,
+            record.total_time ?? 0,
+            record.save_time ?? Date.now(),
+            record.search_title || ''
+          )
+      );
+    }
+    await this.runBatch(statements, onProgress);
+  }
+
+  // 批量导入收藏（entries: [key, favorite][]）
+  async batchImportFavorites(
+    username: string,
+    entries: Array<[string, Favorite]>,
+    onProgress?: (done: number, total: number) => void
+  ): Promise<void> {
+    const userId = await this.ensureUser(username);
+    const statements: D1PreparedStatement[] = [];
+    for (const [key, favorite] of entries) {
+      const [source, videoId] = key.split('+');
+      if (!source || !videoId) continue;
+      statements.push(
+        this.db
+          .prepare(
+            `
+            INSERT INTO favorites
+            (user_id, source, video_id, title, source_name, year, cover, total_episodes, save_time, search_title)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, source, video_id)
+            DO UPDATE SET
+              title = excluded.title,
+              source_name = excluded.source_name,
+              year = excluded.year,
+              cover = excluded.cover,
+              total_episodes = excluded.total_episodes,
+              save_time = excluded.save_time,
+              search_title = excluded.search_title
+            `
+          )
+          .bind(
+            userId,
+            source,
+            videoId,
+            favorite.title || '',
+            favorite.source_name || '',
+            favorite.year || '',
+            favorite.cover || '',
+            favorite.total_episodes ?? 0,
+            favorite.save_time ?? Date.now(),
+            favorite.search_title || ''
+          )
+      );
+    }
+    await this.runBatch(statements, onProgress);
+  }
+
+  // 批量导入追更（entries: [key, following][]）
+  async batchImportFollowings(
+    username: string,
+    entries: Array<[string, Following]>,
+    onProgress?: (done: number, total: number) => void
+  ): Promise<void> {
+    const userId = await this.ensureUser(username);
+    const statements: D1PreparedStatement[] = [];
+    for (const [key, following] of entries) {
+      const [source, videoId] = key.split('+');
+      if (!source || !videoId) continue;
+      statements.push(
+        this.db
+          .prepare(
+            `
+            INSERT INTO followings
+            (user_id, source, video_id, title, source_name, year, cover, total_episodes, watched_episodes, save_time, search_title)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, source, video_id)
+            DO UPDATE SET
+              title = excluded.title,
+              source_name = excluded.source_name,
+              year = excluded.year,
+              cover = excluded.cover,
+              total_episodes = excluded.total_episodes,
+              watched_episodes = excluded.watched_episodes,
+              save_time = excluded.save_time,
+              search_title = excluded.search_title,
+              updated_at = CURRENT_TIMESTAMP
+            `
+          )
+          .bind(
+            userId,
+            source,
+            videoId,
+            following.title || '',
+            following.source_name || '',
+            following.year || '',
+            following.cover || '',
+            following.total_episodes ?? 0,
+            following.watched_episodes ?? 0,
+            following.save_time ?? Date.now(),
+            following.search_title || ''
+          )
+      );
+    }
+    await this.runBatch(statements, onProgress);
+  }
+
+  // 批量导入跳过片头片尾配置（entries: [key, skipConfig][]）
+  async batchImportSkipConfigs(
+    username: string,
+    entries: Array<[string, SkipConfig]>,
+    onProgress?: (done: number, total: number) => void
+  ): Promise<void> {
+    const userId = await this.ensureUser(username);
+    const statements: D1PreparedStatement[] = [];
+    for (const [key, config] of entries) {
+      const [source, videoId] = key.split('+');
+      if (!source || !videoId) continue;
+      statements.push(
+        this.db
+          .prepare(
+            `
+            INSERT INTO skip_configs (user_id, source, video_id, enable, intro_time, outro_time)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, source, video_id)
+            DO UPDATE SET
+              enable = excluded.enable,
+              intro_time = excluded.intro_time,
+              outro_time = excluded.outro_time,
+              updated_at = CURRENT_TIMESTAMP
+            `
+          )
+          .bind(
+            userId,
+            source,
+            videoId,
+            config.enable ? 1 : 0,
+            config.intro_time ?? 0,
+            config.outro_time ?? 0
+          )
+      );
+    }
+    await this.runBatch(statements, onProgress);
+  }
+
+  // 批量导入搜索历史（keywords 需保持原有顺序）
+  // 说明：getSearchHistory 按 created_at DESC 返回，故 keywords 为“从新到旧”。
+  // 批量插入时若所有 created_at 相同则无法保证顺序，这里为每条显式写入递减的
+  // created_at（最新一条时间最大），从而在批量导入后仍能按原顺序正确展示。
+  async batchImportSearchHistory(
+    username: string,
+    keywords: string[],
+    onProgress?: (done: number, total: number) => void
+  ): Promise<void> {
+    const userId = await this.ensureUser(username);
+    const statements: D1PreparedStatement[] = [];
+    // 基准时间（毫秒），最新一条（索引 0）时间最大，后续每条递减 1 秒
+    const baseTime = Date.now();
+    for (let i = 0; i < keywords.length; i++) {
+      const keyword = keywords[i];
+      if (!keyword) continue;
+      // 格式化为 SQLite 可比较的 UTC 时间字符串 YYYY-MM-DD HH:MM:SS
+      const created = new Date(baseTime - i * 1000)
+        .toISOString()
+        .replace('T', ' ')
+        .slice(0, 19);
+      statements.push(
+        this.db
+          .prepare(
+            'INSERT INTO search_history (user_id, keyword, created_at) VALUES (?, ?, ?)'
+          )
+          .bind(userId, keyword, created)
+      );
+    }
+    await this.runBatch(statements, onProgress);
+  }
+
+  // 批量导入“今日新更”（每个用户仅一行，直接写入即可）
+  async batchImportTodayUpdated(
+    username: string,
+    record: TodayUpdatedRecord
+  ): Promise<void> {
+    const userId = await this.ensureUser(username);
+    await this.db
+      .prepare(
+        `
+        INSERT INTO today_updated (user_id, date, data, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id)
+        DO UPDATE SET
+          date = excluded.date,
+          data = excluded.data,
+          updated_at = CURRENT_TIMESTAMP
+        `
+      )
+      .bind(userId, record.date, JSON.stringify(record))
+      .run();
   }
 }
