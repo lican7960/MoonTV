@@ -139,9 +139,44 @@ export async function GET(request: Request) {
       });
     }
 
-    // 返回分类
+    // 返回分类 + 首页默认推荐
+    // TVBox 首页会向站点发起不带 t/wd 参数的列表请求（如 ?ac=videolist），
+    // 之前此处 list 恒为空导致 TVBox 首页推荐空白，现返回热门电影作为默认推荐
+    const homeOrigin = url.origin;
+    const homeQs = new URLSearchParams();
+    homeQs.set('kind', 'movie');
+    homeQs.set('start', String((pgParam - 1) * pageSize));
+    homeQs.set('limit', String(pageSize));
+
+    let homeList: any[] = [];
+    try {
+      const homeResp = await fetch(
+        `${homeOrigin}/api/douban/recommends?${homeQs.toString()}`
+      );
+      const homeData = await homeResp.json();
+      homeList = Array.isArray((homeData as any).list) ? (homeData as any).list : [];
+    } catch (e) {
+      // 首页推荐获取失败时仍返回分类，避免 TVBox 报错
+      homeList = [];
+    }
+
     return NextResponse.json(
-      { code: 1, msg: 'success', class: classes, list: [] },
+      {
+        code: 1,
+        msg: 'success',
+        page: pgParam,
+        pagecount: 999,
+        limit: pageSize,
+        total: 0,
+        class: classes,
+        list: homeList.map((item: any) => ({
+          vod_id: item.id,
+          vod_name: item.title,
+          vod_pic: item.poster,
+          vod_year: item.year || '',
+          vod_remarks: item.rate || '',
+        })),
+      },
       {
         headers: {
           'Cache-Control': `public, max-age=${cacheTime}, s-maxage=0`,
@@ -152,5 +187,3 @@ export async function GET(request: Request) {
     return NextResponse.json({ code: 0, msg: 'error', class: [], list: [] }, { status: 500 });
   }
 }
-
-
