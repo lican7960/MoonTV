@@ -33,6 +33,7 @@ import {
   createCustomHlsLoader,
   createDanmakuInitialConfig,
   DANMAKU_VISIBLE_RESTORE_DELAY_MS,
+  flushDanmakuSettings,
   formatTime,
   pickDanmakuSettings,
   saveDanmakuSettings,
@@ -267,8 +268,15 @@ export function usePlayEngine() {
   const lastPlaybackRateRef = useRef<number>(1.0);
   const lastFullscreenRef = useRef<boolean>(false);
   const lastFullscreenWebRef = useRef<boolean>(false);
-  // 弹幕插件配置：默认配置叠加本地持久化的用户设置，保证刷新后自动恢复
-  const danmakuConfigRef = useRef<any>(createDanmakuInitialConfig());
+  // 弹幕插件配置：默认配置叠加本地持久化的用户设置，保证刷新后自动恢复。
+  // 注意 useRef 的参数每次渲染都会被求值，直接传函数调用会导致每次渲染都读一次存储，
+  // 因此改为渲染期惰性初始化（只在首次渲染赋值）。
+  const danmakuConfigRef = useRef<any>(null);
+  if (danmakuConfigRef.current === null) {
+    danmakuConfigRef.current = createDanmakuInitialConfig();
+  }
+  // 上一次已处理的弹幕设置指纹：用于过滤插件逐帧广播的重复 config 事件
+  const lastDanmakuSettingsKeyRef = useRef<string>('');
 
   // 换源相关状态
   const [availableSources, setAvailableSources] = useState<SearchResult[]>([]);
@@ -1385,6 +1393,8 @@ export function usePlayEngine() {
     // 页面即将卸载时保存播放进度和清理资源
     const handleBeforeUnload = () => {
       saveCurrentPlayProgress();
+      // 去抖中的弹幕设置在这里落盘，避免关闭页面时丢失
+      flushDanmakuSettings();
       releaseWakeLock();
       cleanupPlayer();
     };
@@ -1394,6 +1404,8 @@ export function usePlayEngine() {
       if (document.visibilityState === 'hidden') {
         saveCurrentPlayProgress();
         releaseWakeLock();
+        // 手机切后台/锁屏时补一次落盘
+        flushDanmakuSettings();
       } else if (document.visibilityState === 'visible') {
         // 页面重新可见时，如果正在播放则重新请求 Wake Lock
         if (artPlayerRef.current && !artPlayerRef.current.paused) {
@@ -1404,11 +1416,14 @@ export function usePlayEngine() {
 
     // 添加事件监听器
     window.addEventListener('beforeunload', handleBeforeUnload);
+    // iOS Safari 上 beforeunload 不可靠，补一个 pagehide
+    window.addEventListener('pagehide', handleBeforeUnload);
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       // 清理事件监听器
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handleBeforeUnload);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [currentEpisodeIndex, detail, artPlayerRef.current]);
@@ -1850,6 +1865,13 @@ export function usePlayEngine() {
           if (pendingDanmakuVisibleRestoreRef.current !== null) {
             delete picked.visible;
           }
+
+          // 插件在拖动滑块时会逐帧重复广播本事件，这里按"实际要落盘的内容"做判重，
+          // 指纹没变就直接返回，避免每帧都走一遍持久化逻辑
+          const settingsKey = JSON.stringify(picked);
+          if (settingsKey === lastDanmakuSettingsKeyRef.current) return;
+          lastDanmakuSettingsKeyRef.current = settingsKey;
+
           saveDanmakuSettings(picked);
         }
       );
@@ -1862,6 +1884,8 @@ export function usePlayEngine() {
       artPlayerRef.current.on('pause', () => {
         releaseWakeLock();
         saveCurrentPlayProgress();
+        // 弹幕设置是去抖落盘的，暂停时补一次立即落盘，避免改动丢失
+        flushDanmakuSettings();
       });
 
       artPlayerRef.current.on('video:ended', () => {
@@ -2041,6 +2065,9 @@ export function usePlayEngine() {
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
+      // 组件卸载前把去抖中的弹幕设置落盘
+      flushDanmakuSettings();
+
       if (danmakuVisibleRestoreTimerRef.current) {
         clearTimeout(danmakuVisibleRestoreTimerRef.current);
         danmakuVisibleRestoreTimerRef.current = null;
