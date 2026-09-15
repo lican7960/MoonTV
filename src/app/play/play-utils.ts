@@ -286,25 +286,44 @@ export function pickDanmakuSettings(config: any): Partial<DanmakuSettings> {
   return result;
 }
 
+/** 内存中的弹幕设置快照：避免重复触发 localStorage 同步读 + JSON.parse */
+let danmakuSettingsCache: Partial<DanmakuSettings> | null = null;
+
+/** 内存快照相对磁盘是否已变脏（需要落盘） */
+let danmakuSettingsDirty = false;
+
+/** 去抖落盘定时器 */
+let danmakuSettingsFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 落盘去抖延迟（毫秒）：拖动结束后约 400ms 才写一次存储 */
+const DANMAKU_SETTINGS_FLUSH_DELAY_MS = 400;
+
 /**
  * 读取本地保存的弹幕设置（含校验），无有效数据时返回空对象。
+ *
+ * 首次调用后结果常驻内存，后续调用不再触碰 localStorage。
  */
 export function loadDanmakuSettings(): Partial<DanmakuSettings> {
   if (typeof window === 'undefined') return {};
 
-  try {
-    const raw = window.localStorage.getItem(DANMAKU_SETTINGS_STORAGE_KEY);
-    if (!raw) return {};
-    return pickDanmakuSettings(JSON.parse(raw));
-  } catch {
-    return {};
+  if (!danmakuSettingsCache) {
+    try {
+      const raw = window.localStorage.getItem(DANMAKU_SETTINGS_STORAGE_KEY);
+      danmakuSettingsCache = raw ? pickDanmakuSettings(JSON.parse(raw)) : {};
+    } catch {
+      danmakuSettingsCache = {};
+    }
   }
+
+  return { ...danmakuSettingsCache };
 }
 
 /**
- * 将弹幕设置写入本地存储。
+ * 记录弹幕设置：先写内存，去抖后再落盘。
  *
  * 默认与已有设置合并，便于只更新部分字段；replace 为 true 时整体覆盖。
+ * 拖动弹幕设置滑块时插件会逐帧调用本函数，因此这里绝不能同步 setItem，
+ * 否则每帧一次同步写盘会阻塞主线程，导致移动端播放页卡死。
  */
 export function saveDanmakuSettings(
   settings: Partial<DanmakuSettings>,
@@ -312,16 +331,43 @@ export function saveDanmakuSettings(
 ): void {
   if (typeof window === 'undefined') return;
 
+  const base = danmakuSettingsCache ?? loadDanmakuSettings();
+  danmakuSettingsCache = options.replace
+    ? { ...settings }
+    : { ...base, ...settings };
+  danmakuSettingsDirty = true;
+
+  if (danmakuSettingsFlushTimer) clearTimeout(danmakuSettingsFlushTimer);
+  danmakuSettingsFlushTimer = setTimeout(() => {
+    danmakuSettingsFlushTimer = null;
+    flushDanmakuSettings();
+  }, DANMAKU_SETTINGS_FLUSH_DELAY_MS);
+}
+
+/**
+ * 立即把内存中的弹幕设置落盘。
+ *
+ * 用于暂停、切集、页面隐藏/卸载等时机，确保去抖窗口内的改动不丢失。
+ */
+export function flushDanmakuSettings(): void {
+  if (typeof window === 'undefined') return;
+
+  if (danmakuSettingsFlushTimer) {
+    clearTimeout(danmakuSettingsFlushTimer);
+    danmakuSettingsFlushTimer = null;
+  }
+
+  if (!danmakuSettingsDirty || !danmakuSettingsCache) return;
+  danmakuSettingsDirty = false;
+
   try {
-    const merged = options.replace
-      ? settings
-      : { ...loadDanmakuSettings(), ...settings };
     window.localStorage.setItem(
       DANMAKU_SETTINGS_STORAGE_KEY,
-      JSON.stringify(merged)
+      JSON.stringify(danmakuSettingsCache)
     );
   } catch {
     // localStorage 不可用（如隐私模式）时静默失败，不影响播放
+    danmakuSettingsDirty = true;
   }
 }
 
