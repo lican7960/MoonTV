@@ -23,7 +23,7 @@ export interface BangumiCalendarData {
 }
 
 export async function GetBangumiCalendarData(): Promise<BangumiCalendarData[]> {
-  const response = await fetch('https://api.bangumi.pro/calendar');
+  const response = await fetch('https://api.bangumi.vip/calendar');
   const data = await response.json();
   const filteredData = data.map((item: BangumiCalendarData) => ({
     ...item,
