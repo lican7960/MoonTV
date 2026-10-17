@@ -44,7 +44,11 @@ import {
 } from '@/lib/playback-recovery';
 import { getDefaultPlaybackSaveInterval } from '@/lib/playback-settings';
 import { SearchResult } from '@/lib/types';
-import { getRequestTimeout, getVideoResolutionFromM3u8 } from '@/lib/utils';
+import {
+  getRequestTimeout,
+  getVideoResolutionFromM3u8,
+  processImageUrl,
+} from '@/lib/utils';
 import {
   getSegmentProbe,
   loadCacheSettings,
@@ -1772,7 +1776,7 @@ export function usePlayEngine() {
       artPlayerRef.current.title = `${videoTitle} - 第${
         currentEpisodeIndex + 1
       }集`;
-      artPlayerRef.current.poster = videoCover;
+      artPlayerRef.current.poster = processImageUrl(videoCover);
       if (artPlayerRef.current?.video) {
         ensureVideoSource(
           artPlayerRef.current.video as HTMLVideoElement,
@@ -1789,7 +1793,7 @@ export function usePlayEngine() {
       artPlayerRef.current.title = `${videoTitle} - 第${
         currentEpisodeIndex + 1
       }集`;
-      artPlayerRef.current.poster = videoCover;
+      artPlayerRef.current.poster = processImageUrl(videoCover);
       if (artPlayerRef.current?.video) {
         ensureVideoSource(
           artPlayerRef.current.video as HTMLVideoElement,

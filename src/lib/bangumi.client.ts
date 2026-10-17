@@ -1,5 +1,4 @@
 'use client';
-
 export interface BangumiCalendarData {
   weekday: {
     en: string;
@@ -24,24 +23,23 @@ export interface BangumiCalendarData {
 
 export async function GetBangumiCalendarData(): Promise<BangumiCalendarData[]> {
   try {
-    // 自有修复：官方 api.bgm.tv 在国内访问不稳定，改用镜像 api.bangumi.vip
-    const response = await fetch('https://api.bangumi.vip/calendar');
+    // 改走站内 API 路由（src/app/api/bangumi/calendar/route.ts，edge 运行时）：
+    // 该路由默认使用国内镜像 api.bangumi.vip、失败回退官方 api.bgm.tv，
+    // 并顺带处理图片代理与 30 分钟缓存；镜像地址可用 SiteConfig.BangumiProxy 覆盖。
+    const response = await fetch('/api/bangumi/calendar', {
+      headers: {
+        Accept: 'application/json',
+      },
+    });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-
     const data = await response.json();
-    if (!Array.isArray(data)) {
-      return [];
-    }
-
-    return data.map((item: BangumiCalendarData) => ({
-      ...item,
-      items: item.items.filter((bangumiItem) => bangumiItem.images),
-    }));
+    if (!Array.isArray(data)) return [];
+    return data as BangumiCalendarData[];
   } catch (error) {
     // eslint-disable-next-line no-console
-    console.error('获取 Bangumi 日历失败:', error);
+    console.error('Bangumi 日历请求失败:', error);
     return [];
   }
 }
