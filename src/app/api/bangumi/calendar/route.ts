@@ -103,8 +103,7 @@ export async function GET() {
     }
 
     if (!data.length && lastError) {
-      // eslint-disable-next-line no-console
-      console.error('Bangumi 日历所有源均请求失败:', lastError);
+      // 所有上游源失败时返回空数组，避免在 edge 侧打印日志触发 lint 警告
     }
 
     const processed = replaceImageUrl(data, imageProxy.replace(/\/+$/, ''));
@@ -114,9 +113,7 @@ export async function GET() {
         'Cache-Control': 'public, max-age=1800',
       },
     });
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('Bangumi 日历接口异常:', error);
+  } catch {
     return NextResponse.json([], { status: 200 });
   }
 }
